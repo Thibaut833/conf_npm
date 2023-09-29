@@ -1,0 +1,98 @@
+---
+# tasks file for conf_npm
+
+- name: Je récupère le token sur NPM
+  ansible.builtin.uri:
+    url: http://localhost:81/api/tokens
+    method: POST
+    return_content: true
+    status_code:
+      - 200
+      - 401
+    body:
+      identity: "{{ new_login_npm }}"
+      secret: "{{ new_password_npm }}"
+    body_format: form-multipart
+  register: token_npm
+
+- name: Je configure Nginx Proxy Manager
+  when: token_npm.status == 200
+  block:
+    - name: Je crée un certificat dans Nginx Proxy Manager
+      ansible.builtin.uri:
+        url: "http://{{ dnsname_npm }}/api/nginx/certificates"
+        method: POST
+        return_content: true
+        status_code: 201
+        headers:
+          Authorization: "Bearer {{ token_npm.json.token }}"
+        body_format: json
+        body:
+          provider: "other"
+          nice_name: "{{ nom_serveur }}"
+      register: certificate_id
+
+    - name: Je récupère le contenu du certificat de {{ nom_serveur }}.{{ nom_domaine }}
+      ansible.builtin.slurp:
+        src: "/data/ca_ansible/{{ nom_serveur }}/cert_{{ nom_serveur }}.pem"
+      register: certificate
+
+    - name: Je récupère le contenu de la clé de {{ nom_serveur }}.{{ nom_domaine }}
+      ansible.builtin.slurp:
+        src: "/data/ca_ansible/{{ nom_serveur }}/cert_{{ nom_serveur }}.key"
+      register: key
+
+    - name: J'importe le certificat dans Nginx Proxy Manager
+      ansible.builtin.uri:
+        url: "http://{{ dnsname_npm }}/api/nginx/certificates/{{ certificate_id.json.id }}/upload"
+        method: POST
+        return_content: true
+        headers:
+          authorization: "Bearer {{ token_npm.json.token }}"
+        remote_src: true
+        body_format: form-multipart
+        body:
+          certificate_key:
+            content: "{{ key.content | b64decode }}"
+            filename: "/data/ca_ansible/{{ nom_serveur }}/cert_{{ nom_serveur }}.key"
+            mime_type: text/plain
+          certificate:
+            content: "{{ certificate.content | b64decode }}"
+            filename: "/data/ca_ansible/{{ nom_serveur }}/cert_{{ nom_serveur }}.pem"
+            mime_type: text/plain
+
+    - name: Je crée le proxy host sur dans Nginx Proxy Manager de {{ nom_serveur }}
+      ansible.builtin.uri:
+        url: "http://{{ dnsname_npm }}/api/nginx/proxy-hosts"
+        method: POST
+        return_content: true
+        headers:
+          authorization: "Bearer {{ token_npm.json.token }}"
+        body_format: json
+        status_code:
+          - 201
+        body:
+          domain_names:
+            - "{{ nom_serveur }}.{{ nom_domaine }}"
+          forward_scheme: "http"
+          forward_host: "{{ forward_host }}"
+          forward_port: "{{ forward_port }}"
+          access_list_id: "0"
+          certificate_id: "{{ certificate_id.json.id }}"
+          ssl_forced: true
+          meta:
+            letsencrypt_agree: false
+            dns_challenge: false
+          advanced_config: ""
+          locations:
+            - path: "/"
+              advanced_config: ""
+              forward_scheme: "http"
+              forward_host: "{{ forward_host }}"
+              forward_port: "{{ forward_port }}"
+          block_exploits: true
+          caching_enabled: true
+          allow_websocket_upgrade: true
+          http2_support: false
+          hsts_enabled: true
+          hsts_subdomains: false
